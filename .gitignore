@@ -1,0 +1,20 @@
+# Credentials & Config
+.env
+tokens.json
+
+# Dependencies
+node_modules/
+
+# Archives & Backups
+bak/
+*.log
+*.har
+
+# System & Browser
+chrome_profile/
+.DS_Store
+Thumbs.db
+
+# Proxies
+proxy.txt
+proxies.txt
