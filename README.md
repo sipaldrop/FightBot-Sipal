@@ -51,7 +51,12 @@ Advanced multi-account automation tool for the Fight.id Airdrop campaign. Design
 
    # Optional: Proxy (User:Pass@Host:Port)
    PROXY=http://user:pass@host:port
+   # Optional: Proxy (User:Pass@Host:Port)
+   PROXY=http://user:pass@host:port
    ```
+
+   **OR for Multiple Proxies:**
+   Create a `proxy.txt` file in the root directory (one proxy per line). The bot will rotate them automatically for each account.
 
 ---
 

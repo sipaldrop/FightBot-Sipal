@@ -141,7 +141,7 @@ async function createAxiosInstance(proxy) {
     };
 }
 
-async function processAccount(privateKey, index) {
+async function processAccount(privateKey, index, proxy) {
     let chalk;
     try { chalk = (await chalkPromise).default; } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, bold: s => s }; }
 
@@ -157,8 +157,9 @@ async function processAccount(privateKey, index) {
 
     console.log(`\n════════════ ACCOUNT ${index + 1} ════════════`);
     console.log(`Wallet: ${wallet.address}`);
+    if (proxy) console.log(`Proxy: ${proxy}`);
 
-    const { client, ua, ip } = await createAxiosInstance(CONFIG.PROXY);
+    const { client, ua, ip } = await createAxiosInstance(proxy);
     let token = null;
     let headers = Humanizer.getHeaders(null, ua);
 
@@ -418,17 +419,30 @@ async function displayCountdown(ms, targetTime) {
 
 // ============================================
 // MAIN LOOP
-// ============================================
+// ================// ============== MAIN ==============
 (async () => {
     let chalk;
     try { chalk = (await chalkPromise).default; } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, bold: s => s }; }
     console.log(chalk.bold.cyan('\n🤖 FIGHT BOT ROBUST V2'));
 
+    // Load Proxies
+    let proxies = [];
+    if (fs.existsSync('proxy.txt')) {
+        proxies = fs.readFileSync('proxy.txt', 'utf8').split('\n').map(p => p.trim()).filter(p => p);
+        if (proxies.length > 0) console.log(chalk.green(`   ✅ Loaded ${proxies.length} proxies from proxy.txt`));
+    }
+    if (proxies.length === 0 && process.env.PROXY) { // Use process.env.PROXY for single proxy from .env
+        proxies = [process.env.PROXY];
+        console.log(chalk.green('   ✅ Using single proxy from .env'));
+    }
+
     while (true) {
         try {
             const results = [];
             for (let i = 0; i < CONFIG.PRIVATE_KEYS.length; i++) {
-                const res = await processAccount(CONFIG.PRIVATE_KEYS[i].trim(), i);
+                // Round-robin proxy assignment
+                const proxy = proxies.length > 0 ? proxies[i % proxies.length] : null;
+                const res = await processAccount(CONFIG.PRIVATE_KEYS[i].trim(), i, proxy);
                 results.push(res);
                 await Humanizer.delay(5, 10);
             }
