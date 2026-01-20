@@ -1,0 +1,27 @@
+{
+    "API_BASE": "https://api.fight.id",
+    "MINT_THRESHOLD": 2000,
+    "SCHEDULED_HOUR": 7,
+    "SCHEDULED_MINUTE": 30,
+    "RETRY_LIMIT": 5,
+    "CONTRACT_ADDRESS": "0xD0B591751E6aa314192810471461bDE963796306",
+    "MINT_SELECTOR": "0x6548b7ae",
+    "BSC_RPCS": [
+        "https://bsc-dataseed1.binance.org/",
+        "https://bsc-dataseed2.binance.org/",
+        "https://bsc-dataseed3.binance.org/",
+        "https://bsc-dataseed4.binance.org/",
+        "https://bsc.publicnode.com",
+        "https://binance.llamarpc.com"
+    ],
+    "GAMES": [
+        {
+            "id": "punching-bag-daily",
+            "name": "Punching Bag"
+        },
+        {
+            "id": "punching-ear-bag-daily",
+            "name": "Ear Bag"
+        }
+    ]
+}

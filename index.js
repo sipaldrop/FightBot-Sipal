@@ -1,7 +1,6 @@
 /**
- * index.js - Fight.id Full Automation Bot (Robust & Humanized)
+ * index.js - Fight.id Full Automation Bot (Sipal Flat Structure)
  */
-require('dotenv').config();
 const axios = require('axios');
 const { ethers } = require('ethers');
 const fs = require('fs');
@@ -10,31 +9,16 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const chalkPromise = import('chalk');
 
 // ============================================
-// CONFIGURATION
+// LOAD CONFIGURATION
 // ============================================
-const CONFIG = {
-    API_BASE: 'https://api.fight.id',
-    PRIVATE_KEYS: process.env.PRIVATE_KEYS ? process.env.PRIVATE_KEYS.split(',') : [],
-    PROXY: process.env.PROXY || null, // Format: http://user:pass@host:port
-    MINT_THRESHOLD: 2000,
-    SCHEDULED_HOUR: 7,
-    SCHEDULED_MINUTE: 30,
-    RETRY_LIMIT: 3,
-    CONTRACT_ADDRESS: '0xD0B591751E6aa314192810471461bDE963796306', // BSC
-    MINT_SELECTOR: '0x6548b7ae'
-};
+const CONFIG = JSON.parse(fs.readFileSync('config.json', 'utf8'));
+const ACCOUNTS = JSON.parse(fs.readFileSync('accounts.json', 'utf8'));
+const TOKEN_FILE = 'tokens.json';
 
-const GAMES = [
-    { id: 'punching-bag-daily', name: 'Punching Bag' },
-    { id: 'punching-ear-bag-daily', name: 'Ear Bag' }
-];
-
-if (CONFIG.PRIVATE_KEYS.length === 0) {
-    console.error('❌ Error: PRIVATE_KEYS not found in .env');
+if (!ACCOUNTS || ACCOUNTS.length === 0) {
+    console.error('❌ Error: No accounts found in accounts.json');
     process.exit(1);
 }
-
-const TOKEN_FILE = 'tokens.json';
 
 // ============================================
 // HUMANIZER UTILS
@@ -78,7 +62,6 @@ class Humanizer {
 
         for (let i = 0; i < numVisits; i++) {
             const page = pages[Math.floor(Math.random() * pages.length)];
-            // console.log(`   randomly checking ${page}...`); // Too noisy, keep silent
             try {
                 await axiosInstance.get(CONFIG.API_BASE + page).catch(() => { });
                 await this.delay(2, 5);
@@ -107,10 +90,39 @@ function getTokens() {
     } catch { return {}; }
 }
 
+async function retry(fn, context, retries = CONFIG.RETRY_LIMIT) {
+    for (let i = 1; i <= retries; i++) {
+        try {
+            return await fn();
+        } catch (e) {
+            const msg = e.response?.data?.message || e.message || 'Unknown Error';
+            console.log(`      ⚠️ [${context}] Attempt ${i}/${retries} failed: ${msg}`);
+            if (i === retries) throw e;
+            await Humanizer.delay(2, 5);
+        }
+    }
+}
+
 function saveToken(address, tokenData) {
     const tokens = getTokens();
     tokens[address] = tokenData;
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
+}
+
+// Get a working BSC provider (tries multiple RPCs)
+async function getWorkingProvider() {
+    for (const rpc of CONFIG.BSC_RPCS) {
+        try {
+            const provider = new ethers.providers.JsonRpcProvider(rpc);
+            await Promise.race([
+                provider.getBlockNumber(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('RPC timeout')), 5000))
+            ]);
+            return provider;
+        } catch { continue; }
+    }
+    // Fallback to first RPC if all fail
+    return new ethers.providers.JsonRpcProvider(CONFIG.BSC_RPCS[0]);
 }
 
 // ============================================
@@ -141,25 +153,26 @@ async function createAxiosInstance(proxy) {
     };
 }
 
-async function processAccount(privateKey, index, proxy) {
+async function processAccount(account, index) {
     let chalk;
     try { chalk = (await chalkPromise).default; } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, bold: s => s }; }
 
     let wallet;
-    const provider = new ethers.providers.JsonRpcProvider('https://bsc-dataseed.binance.org/');
+    let provider;
     try {
-        const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+        provider = await getWorkingProvider();
+        const pk = account.privateKey.startsWith('0x') ? account.privateKey : `0x${account.privateKey}`;
         wallet = new ethers.Wallet(pk.trim(), provider);
     } catch (e) {
-        console.log(chalk.red(`❌ Invalid key at line ${index + 1}: ${e.message}`));
+        console.log(chalk.red(`❌ Invalid key at account ${index + 1}: ${e.message}`));
         return { status: 'INVALID KEY' };
     }
 
     console.log(`\n════════════ ACCOUNT ${index + 1} ════════════`);
     console.log(`Wallet: ${wallet.address}`);
-    if (proxy) console.log(`Proxy: ${proxy}`);
+    if (account.proxy) console.log(`Proxy: ${account.proxy}`);
 
-    const { client, ua, ip } = await createAxiosInstance(proxy);
+    const { client, ua, ip } = await createAxiosInstance(account.proxy);
     let token = null;
     let headers = Humanizer.getHeaders(null, ua);
 
@@ -180,34 +193,39 @@ async function processAccount(privateKey, index, proxy) {
             headers = Humanizer.getHeaders(token, ua);
             console.log('   ✅ Using saved token');
             try {
-                await client.get(`${CONFIG.API_BASE}/seasons/user/progress`, { headers });
+                await retry(() => client.get(`${CONFIG.API_BASE}/seasons/user/progress`, { headers }), 'Login Check');
                 loggedIn = true;
-            } catch (e) { console.log('   ⚠️ Token expired'); }
+            } catch (e) { console.log('   ⚠️ Token expired or check failed'); }
         }
     }
 
     if (!loggedIn) {
         try {
-            const siwaRes = await client.get(`${CONFIG.API_BASE}/auth/siwa`, { headers });
-            const { nonce, nonceId, statement, resources } = siwaRes.data.data;
-            const signature = await wallet.signMessage(statement);
+            await retry(async () => {
+                console.log('   ⏳ Processing: authenticating with SIWA...');
+                const siwaRes = await client.get(`${CONFIG.API_BASE}/auth/siwa`, { headers });
+                const { nonce, nonceId, statement, resources } = siwaRes.data.data;
+                const signature = await wallet.signMessage(statement);
+                console.log('   ✅ SIWA auth complete');
 
-            const callbackRes = await client.post(`${CONFIG.API_BASE}/auth/siwa/callback`, {
-                input: { nonce, nonceId, resources, statement },
-                output: {
-                    address: wallet.address, signature, nonce, message: statement, fullMessage: statement,
-                    domain: 'app.fight.id', statement, email: '', timestamp: Date.now()
-                }
-            }, { headers });
+                console.log('   ⏳ Processing: verifying login...');
+                const callbackRes = await client.post(`${CONFIG.API_BASE}/auth/siwa/callback`, {
+                    input: { nonce, nonceId, resources, statement },
+                    output: {
+                        address: wallet.address, signature, nonce, message: statement, fullMessage: statement,
+                        domain: 'app.fight.id', statement, email: '', timestamp: Date.now()
+                    }
+                }, { headers });
 
-            const data = callbackRes.data.data;
-            token = data.accessToken;
-            headers = Humanizer.getHeaders(token, ua);
-            saveToken(wallet.address, { token, userId: data.userId, username: data.username, date: new Date().toISOString() });
-            console.log(`   ✅ Logged in as ${data.username}`);
+                const data = callbackRes.data.data;
+                token = data.accessToken;
+                headers = Humanizer.getHeaders(token, ua);
+                saveToken(wallet.address, { token, userId: data.userId, username: data.username, date: new Date().toISOString() });
+                console.log(`   ✅ Login verified: ${data.username}`);
+            }, 'Login Process');
             loggedIn = true;
         } catch (e) {
-            console.log(`   ❌ Login failed: ${e.message}`);
+            console.log(`   ❌ Login failed after ${CONFIG.RETRY_LIMIT} attempts: ${e.message}`);
             statusLog.login = '❌ FAIL';
             return { account: `Account ${index + 1}`, status: statusLog };
         }
@@ -217,45 +235,110 @@ async function processAccount(privateKey, index, proxy) {
     // --- RANDOM NOISE ---
     await Humanizer.noiseTraffic(client);
 
+    // --- CHECK BALANCE & MINT ---
+    try {
+        console.log('\n💰 Checking Balance & Mint...');
+        console.log('   ⏳ Processing: fetching balance...');
+        const [userRes, seasonRes] = await Promise.all([
+            client.get(`${CONFIG.API_BASE}/user`, { headers }),
+            client.get(`${CONFIG.API_BASE}/seasons/all`, { headers })
+        ]);
+        const total = userRes.data.data.userSeasonPoints?.[0]?.totalPoints || 0;
+        const activeSeason = seasonRes.data.data.find(s => s.isActive);
+        const migratable = activeSeason ? activeSeason.migratablePoints : 0;
+        const minted = Math.max(0, total - migratable);
+        console.log(`   ✅ Balance fetched: Unclaimed ${migratable}, Minted ${minted}`);
+
+        statusLog.balance = `Unclaimed: ${migratable} | Minted: ${minted}`;
+
+        if (activeSeason && migratable >= CONFIG.MINT_THRESHOLD) {
+            console.log(`   🚀 Minting ${migratable} FP...`);
+            try {
+                console.log('   ⏳ Processing: requesting mint signature...');
+                const mintRes = await client.post(`${CONFIG.API_BASE}/seasons/token/mint`, {
+                    blockchainAddress: wallet.address
+                }, { headers });
+                const d = mintRes.data.data;
+                console.log(`   ✅ Mint signature obtained`);
+
+                const abiCoder = new ethers.utils.AbiCoder();
+                const params = abiCoder.encode(['uint256', 'uint256', 'uint256', 'uint256', 'bytes'],
+                    [activeSeason.tokenId, d.amount, d.nonce, d.deadline, d.signature]);
+                const txData = CONFIG.MINT_SELECTOR + params.substring(2);
+
+                const freshProvider = await getWorkingProvider();
+                const signer = wallet.connect(freshProvider);
+                console.log('   ⏳ Processing: sending mint transaction...');
+                const tx = await signer.sendTransaction({ to: CONFIG.CONTRACT_ADDRESS, data: txData });
+                console.log(`   ✅ Mint tx sent: ${tx.hash}`);
+
+                console.log('   ⏳ Processing: waiting for confirmation...');
+                await tx.wait();
+                console.log('   ✅ Tx confirmed on-chain');
+
+                await client.post(`${CONFIG.API_BASE}/seasons/mintings/${d.mintingId}/confirm`, { transactionHash: tx.hash }, { headers });
+                console.log(`   ✅ Mint complete: ${d.amount} FP`);
+                statusLog.mint = `✅ MINTED ${d.amount}`;
+
+            } catch (e) {
+                statusLog.mint = '❌ MINT FAIL';
+                console.log(`   ❌ Mint Error: ${e.message}`);
+            }
+        } else {
+            statusLog.mint = `⏳ ${migratable}/${CONFIG.MINT_THRESHOLD}`;
+            console.log(`   ℹ️ Points below threshold (${migratable}/${CONFIG.MINT_THRESHOLD}), skipping mint`);
+        }
+    } catch (e) {
+        statusLog.balance = '❌ ERR';
+        console.log(`   ❌ Balance check error: ${e.message}`);
+    }
+
     // --- PREPARE TASKS ---
     const tasks = [];
 
     // 1. GAMES
     tasks.push(async () => {
-        for (const game of Humanizer.shuffle([...GAMES])) {
+        for (const game of Humanizer.shuffle([...CONFIG.GAMES])) {
             console.log(`\n🥊 Playing ${game.name}...`);
             try {
-                await Humanizer.delay(2, 4);
-                const startRes = await client.get(`${CONFIG.API_BASE}/games/${game.id}/start`, { headers });
-                const sessionId = startRes.data.data.sessionId;
-                if (sessionId) {
-                    // Humanized Tapping
-                    const gameDuration = 5000;
-                    const tapTimestamps = [];
-                    let currentTime = Date.now();
-                    const numTaps = 30 + Math.floor(Math.random() * 25);
-                    const avgInterval = gameDuration / numTaps;
-                    console.log(`   Simulating ${numTaps} taps...`);
+                await retry(async () => {
+                    await Humanizer.delay(2, 4);
+                    console.log(`   ⏳ Processing: starting game session...`);
+                    const startRes = await client.get(`${CONFIG.API_BASE}/games/${game.id}/start`, { headers });
+                    const sessionId = startRes.data.data.sessionId;
+                    if (sessionId) {
+                        console.log(`   ✅ Session started: ${sessionId}`);
+                        // Humanized Tapping
+                        const gameDuration = 5000;
+                        const tapTimestamps = [];
+                        let currentTime = Date.now();
+                        const numTaps = 30 + Math.floor(Math.random() * 25);
+                        const avgInterval = gameDuration / numTaps;
+                        console.log(`   ⏳ Processing: simulating ${numTaps} taps...`);
 
-                    for (let i = 0; i < numTaps; i++) {
-                        const jitter = (Math.random() * 0.8 - 0.4) * avgInterval;
-                        const interval = Math.floor(avgInterval + jitter);
-                        if (Math.random() < 0.05) currentTime += Math.floor(Math.random() * 50);
-                        currentTime += interval;
-                        tapTimestamps.push(currentTime);
+                        for (let i = 0; i < numTaps; i++) {
+                            const jitter = (Math.random() * 0.8 - 0.4) * avgInterval;
+                            const interval = Math.floor(avgInterval + jitter);
+                            if (Math.random() < 0.05) currentTime += Math.floor(Math.random() * 50);
+                            currentTime += interval;
+                            tapTimestamps.push(currentTime);
+                        }
+
+                        const durationToWait = Math.max(0, tapTimestamps[tapTimestamps.length - 1] - Date.now()) + 500;
+                        await new Promise(r => setTimeout(r, durationToWait));
+
+                        console.log(`   ⏳ Processing: submitting score...`);
+                        const submitRes = await client.post(`${CONFIG.API_BASE}/games/${game.id}/submit`, {
+                            clientScore: 0, gameDurationMs: gameDuration,
+                            proofOfWork: { tapTimestamps }, gameSessionId: sessionId
+                        }, { headers });
+                        const points = submitRes.data.data.points;
+                        console.log(`   ✅ Score submitted: +${points} FP`);
+                        statusLog[game.name] = `✅ +${points} FP`;
+                    } else {
+                        statusLog[game.name] = '✅ DONE';
                     }
-
-                    const durationToWait = Math.max(0, tapTimestamps[tapTimestamps.length - 1] - Date.now()) + 500;
-                    await new Promise(r => setTimeout(r, durationToWait));
-
-                    const submitRes = await client.post(`${CONFIG.API_BASE}/games/${game.id}/submit`, {
-                        clientScore: 0, gameDurationMs: gameDuration,
-                        proofOfWork: { tapTimestamps }, gameSessionId: sessionId
-                    }, { headers });
-                    statusLog[game.name] = `✅ +${submitRes.data.data.points} FP`;
-                } else {
-                    statusLog[game.name] = '✅ DONE';
-                }
+                }, `Playing ${game.name}`);
             } catch (e) {
                 const msg = e.response?.data?.message || e.message;
                 statusLog[game.name] = msg.includes('cooldown') || msg.includes('already') ? '✅ DONE' : '❌ ERROR';
@@ -268,49 +351,22 @@ async function processAccount(privateKey, index, proxy) {
     tasks.push(async () => {
         console.log('\n🪂 Checking Airdrop...');
         try {
-            const check = await client.get(`${CONFIG.API_BASE}/quests/be-airdrop-ready/completed`, { headers });
-            if (check.data.data) statusLog.airdrop = '✅ DONE';
-            else {
-                await client.post(`${CONFIG.API_BASE}/user/airdrop/claim-verification-reward`, {}, { headers });
-                statusLog.airdrop = '✅ CLAIMED';
-            }
-        } catch { statusLog.airdrop = '❌ FAIL'; }
-    });
-
-    // 3. USDT DRAW
-    tasks.push(async () => {
-        console.log('\n💵 Checking USDT Draw...');
-        try {
-            const drawRes = await client.post(`${CONFIG.API_BASE}/lottery/free-entry/${wallet.address}`, {}, { headers });
-            if (drawRes.data.success && drawRes.data.data.signature) {
-                console.log('   ✅ Signature obtained. Submitting...');
-                const signature = drawRes.data.data.signature;
-                const USDT_CONTRACT = '0x7D12f0c72a32fb517C79Ea33Cf91327Aa92A41E4';
-                const USDT_SELECTOR = '0x9f2fe488';
-                try {
-                    const tx = {
-                        to: USDT_CONTRACT,
-                        data: USDT_SELECTOR + signature.slice(2),
-                        gasLimit: 150000
-                    };
-                    const signer = wallet.connect(provider);
-                    const txResponse = await signer.sendTransaction(tx);
-                    statusLog.usdt = `✅ ENTERED (Tx: ${txResponse.hash.slice(0, 10)}...)`;
-                    console.log(`   🚀 Tx Sent: ${txResponse.hash}`);
-                } catch (txErr) {
-                    statusLog.usdt = '❌ TX FAIL';
+            await retry(async () => {
+                console.log('   ⏳ Processing: verifying airdrop eligibility...');
+                const check = await client.get(`${CONFIG.API_BASE}/quests/be-airdrop-ready/completed`, { headers });
+                if (check.data.data) {
+                    console.log('   ✅ Airdrop already verified');
+                    statusLog.airdrop = '✅ DONE';
+                } else {
+                    console.log('   ⏳ Processing: claiming airdrop reward...');
+                    await client.post(`${CONFIG.API_BASE}/user/airdrop/claim-verification-reward`, {}, { headers });
+                    console.log('   ✅ Airdrop claimed');
+                    statusLog.airdrop = '✅ CLAIMED';
                 }
-            } else {
-                statusLog.usdt = '❌ NO SIGNATURE';
-            }
-        } catch (e) {
-            const msg = e.response?.data?.message || e.message;
-            if (msg.includes('already') || msg.includes('entry limit')) {
-                statusLog.usdt = '✅ ALREADY ENTERED';
-                console.log('   ✅ User already entered');
-            } else {
-                statusLog.usdt = `❌ ${msg}`;
-            }
+            }, 'Airdrop Check');
+        } catch {
+            console.log('   ❌ Airdrop failed');
+            statusLog.airdrop = '❌ FAIL';
         }
     });
 
@@ -320,46 +376,6 @@ async function processAccount(privateKey, index, proxy) {
         await task();
         await Humanizer.delay(3, 8);
     }
-
-    // --- CHECK BALANCE & MINT ---
-    try {
-        const [userRes, seasonRes] = await Promise.all([
-            client.get(`${CONFIG.API_BASE}/user`, { headers }),
-            client.get(`${CONFIG.API_BASE}/seasons/all`, { headers })
-        ]);
-        const total = userRes.data.data.userSeasonPoints?.[0]?.totalPoints || 0;
-        const activeSeason = seasonRes.data.data.find(s => s.isActive);
-        const migratable = activeSeason ? activeSeason.migratablePoints : 0;
-        const minted = Math.max(0, total - migratable);
-
-        statusLog.balance = `Unclaimed: ${migratable} | Minted: ${minted}`;
-
-        if (activeSeason && migratable >= CONFIG.MINT_THRESHOLD) {
-            console.log(`   🚀 Minting ${migratable} FP...`);
-            try {
-                const mintRes = await client.post(`${CONFIG.API_BASE}/seasons/token/mint`, {
-                    blockchainAddress: wallet.address
-                }, { headers });
-                const d = mintRes.data.data;
-                const abiCoder = new ethers.utils.AbiCoder();
-                const params = abiCoder.encode(['uint256', 'uint256', 'uint256', 'uint256', 'bytes'],
-                    [activeSeason.tokenId, d.amount, d.nonce, d.deadline, d.signature]);
-                const txData = CONFIG.MINT_SELECTOR + params.substring(2);
-
-                const signer = wallet.connect(provider);
-                const tx = await signer.sendTransaction({ to: CONFIG.CONTRACT_ADDRESS, data: txData });
-                console.log(`   ⏳ Mint Tx: ${tx.hash}`);
-                await tx.wait();
-                await client.post(`${CONFIG.API_BASE}/seasons/mintings/${d.mintingId}/confirm`, { transactionHash: tx.hash }, { headers });
-                statusLog.mint = `✅ MINTED ${d.amount}`;
-            } catch (e) {
-                statusLog.mint = '❌ MINT FAIL';
-                console.log(`   ❌ Mint Error: ${e.message}`);
-            }
-        } else {
-            statusLog.mint = `⏳ ${migratable}/${CONFIG.MINT_THRESHOLD}`;
-        }
-    } catch { statusLog.balance = '❌ ERR'; }
 
     return { account: `Account ${index + 1} (${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)})`, status: statusLog };
 }
@@ -419,36 +435,45 @@ async function displayCountdown(ms, targetTime) {
 
 // ============================================
 // MAIN LOOP
-// ================// ============== MAIN ==============
+// ============================================
 (async () => {
     let chalk;
-    try { chalk = (await chalkPromise).default; } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, bold: s => s }; }
-    console.log(chalk.bold.cyan('\n🤖 FIGHT BOT ROBUST V2'));
+    try { chalk = (await chalkPromise).default; } catch { chalk = { green: s => s, red: s => s, yellow: s => s, cyan: s => s, blue: s => s, bold: s => s }; }
 
-    // Load Proxies
-    let proxies = [];
-    if (fs.existsSync('proxy.txt')) {
-        proxies = fs.readFileSync('proxy.txt', 'utf8').split('\n').map(p => p.trim()).filter(p => p);
-        if (proxies.length > 0) console.log(chalk.green(`   ✅ Loaded ${proxies.length} proxies from proxy.txt`));
-    }
-    if (proxies.length === 0 && process.env.PROXY) { // Use process.env.PROXY for single proxy from .env
-        proxies = [process.env.PROXY];
-        console.log(chalk.green('   ✅ Using single proxy from .env'));
-    }
+    // SIPAL AIRDROP STANDARD BANNER
+    console.log(chalk.blue(`
+               / \\
+              /   \\
+             |  |  |
+             |  |  |
+              \\  \\
+             |  |  |
+             |  |  |
+              \\   /
+               \\ /
+    `));
+    console.log(chalk.bold.cyan('    ======SIPAL AIRDROP======'));
+    console.log(chalk.bold.cyan('  =====SIPAL FightBot-Sipal V1.0====='));
+    console.log(chalk.green(`   ✅ Loaded ${ACCOUNTS.length} accounts from accounts.json`));
+    console.log(chalk.green(`   ✅ Config loaded from config.json`));
 
     while (true) {
         try {
             const results = [];
-            for (let i = 0; i < CONFIG.PRIVATE_KEYS.length; i++) {
-                // Round-robin proxy assignment
-                const proxy = proxies.length > 0 ? proxies[i % proxies.length] : null;
-                const res = await processAccount(CONFIG.PRIVATE_KEYS[i].trim(), i, proxy);
-                results.push(res);
+            for (let i = 0; i < ACCOUNTS.length; i++) {
+                try {
+                    const res = await processAccount(ACCOUNTS[i], i);
+                    results.push(res);
+                } catch (accountErr) {
+                    console.log(chalk.red(`\n❌ Account ${i + 1} crashed: ${accountErr.message}`));
+                    results.push({ account: `Account ${i + 1}`, status: { error: '❌ CRASHED' } });
+                }
                 await Humanizer.delay(5, 10);
             }
 
             console.log('\n════════════════════════════════════════════════════════════');
-            console.log(chalk.bold.yellow('📋 SESSION REPORT'));
+            console.log('\n════════════════════════════════════════════════════════════');
+            console.log(chalk.bold.cyan(`                          🤖 SIPAL FightBot-Sipal V1.0 🤖`));
             console.table(results.map(r => ({ Account: r.account, ...r.status })));
             console.log('════════════════════════════════════════════════════════════\n');
 

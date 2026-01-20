@@ -1,20 +1,8 @@
-# Credentials & Config
-.env
-tokens.json
-
-# Dependencies
 node_modules/
-
-# Archives & Backups
-bak/
-*.log
-*.har
-
-# System & Browser
-chrome_profile/
-.DS_Store
-Thumbs.db
-
-# Proxies
+.env
+.env.example
 proxy.txt
-proxies.txt
+accounts.json
+tokens.json
+database.json
+setup_github.bat
